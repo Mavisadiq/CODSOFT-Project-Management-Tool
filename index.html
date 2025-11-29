@@ -1,0 +1,617 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Plus, 
+  Layout, 
+  CheckSquare, 
+  Calendar, 
+  Clock, 
+  MoreVertical, 
+  Trash2, 
+  User, 
+  Users, 
+  ChevronRight, 
+  ArrowLeft,
+  CheckCircle2,
+  AlertCircle,
+  Search,
+  Settings,
+  BarChart3
+} from 'lucide-react';
+import { initializeApp } from "firebase/app";
+import { 
+  getAuth, 
+  signInAnonymously, 
+  onAuthStateChanged,
+  signInWithCustomToken
+} from "firebase/auth";
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  deleteDoc,
+  doc, 
+  updateDoc, 
+  onSnapshot,
+  query,
+  orderBy,
+  where,
+  serverTimestamp
+} from "firebase/firestore";
+
+// --- Firebase Initialization ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Utils ---
+const formatDate = (dateString) => {
+  if (!dateString) return '';
+  return new Date(dateString).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
+const getStatusColor = (status) => {
+  switch (status) {
+    case 'todo': return 'bg-gray-100 text-gray-600 border-gray-200';
+    case 'in-progress': return 'bg-blue-50 text-blue-600 border-blue-200';
+    case 'done': return 'bg-green-50 text-green-600 border-green-200';
+    default: return 'bg-gray-50 text-gray-500';
+  }
+};
+
+const TEAM_MEMBERS = [
+  { id: '1', name: 'Alex Johnson', avatar: 'AJ', color: 'bg-blue-500' },
+  { id: '2', name: 'Sarah Lee', avatar: 'SL', color: 'bg-purple-500' },
+  { id: '3', name: 'Mike Chen', avatar: 'MC', color: 'bg-green-500' },
+  { id: '4', name: 'Emily Davis', avatar: 'ED', color: 'bg-orange-500' },
+];
+
+// --- Components ---
+
+const ProgressBar = ({ total, completed }) => {
+  const percentage = total === 0 ? 0 : Math.round((completed / total) * 100);
+  return (
+    <div className="w-full">
+      <div className="flex justify-between text-xs mb-1">
+        <span className="text-gray-500 font-medium">{percentage}% Complete</span>
+        <span className="text-gray-400">{completed}/{total} tasks</span>
+      </div>
+      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div 
+          className="h-full bg-blue-600 rounded-full transition-all duration-500"
+          style={{ width: ${percentage}% }}
+        />
+      </div>
+    </div>
+  );
+};
+
+const TaskCard = ({ task, onStatusChange, onDelete }) => {
+  const assignee = TEAM_MEMBERS.find(m => m.id === task.assigneeId) || TEAM_MEMBERS[0];
+  const isOverdue = new Date(task.deadline) < new Date() && task.status !== 'done';
+
+  return (
+    <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow group mb-3">
+      <div className="flex justify-between items-start mb-2">
+        <h4 className="font-semibold text-gray-800 leading-tight">{task.title}</h4>
+        <button 
+          onClick={() => onDelete(task.id)}
+          className="text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+        >
+          <Trash2 size={16} />
+        </button>
+      </div>
+      
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`text-xs px-2 py-0.5 rounded-md border ${getStatusColor(task.status)} uppercase font-bold tracking-wide`}>
+          {task.status.replace('-', ' ')}
+        </span>
+        {isOverdue && (
+          <span className="text-xs flex items-center gap-1 text-red-600 font-medium">
+            <AlertCircle size={12} /> Overdue
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-50">
+        <div className="flex items-center gap-2" title={`Assigned to ${assignee.name}`}>
+          <div className={`w-6 h-6 rounded-full ${assignee.color} text-white flex items-center justify-center text-xs font-bold`}>
+            {assignee.avatar}
+          </div>
+          <span className="text-xs text-gray-500 font-medium">{formatDate(task.deadline)}</span>
+        </div>
+        <div className="flex gap-1">
+          {task.status !== 'todo' && (
+            <button 
+              onClick={() => onStatusChange(task.id, 'todo')}
+              className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600"
+              title="Move to Todo"
+            >
+              <ArrowLeft size={14} />
+            </button>
+          )}
+          {task.status !== 'done' && (
+            <button 
+              onClick={() => onStatusChange(task.id, task.status === 'todo' ? 'in-progress' : 'done')}
+              className="p-1 hover:bg-blue-50 rounded text-blue-500 hover:text-blue-700"
+              title="Advance Status"
+            >
+              <ChevronRight size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ProjectView = ({ project, onBack, user }) => {
+  const [tasks, setTasks] = useState([]);
+  const [showNewTask, setShowNewTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskDeadline, setNewTaskDeadline] = useState('');
+  const [newTaskAssignee, setNewTaskAssignee] = useState(TEAM_MEMBERS[0].id);
+
+  // Fetch tasks for this project
+  useEffect(() => {
+    if (!user) return;
+    const q = query(
+      collection(db, 'artifacts', appId, 'public', 'data', 'tasks'),
+      where('projectId', '==', project.id),
+      orderBy('createdAt', 'desc')
+    );
+    
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setTasks(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
+  }, [project.id, user]);
+
+  const handleAddTask = async (e) => {
+    e.preventDefault();
+    if (!newTaskTitle.trim()) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'tasks'), {
+        projectId: project.id,
+        title: newTaskTitle,
+        deadline: newTaskDeadline || new Date().toISOString(),
+        assigneeId: newTaskAssignee,
+        status: 'todo',
+        createdAt: serverTimestamp(),
+        creatorId: user.uid
+      });
+      setNewTaskTitle('');
+      setShowNewTask(false);
+    } catch (err) {
+      console.error("Error adding task:", err);
+    }
+  };
+
+  const handleStatusChange = async (taskId, newStatus) => {
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tasks', taskId), {
+        status: newStatus
+      });
+    } catch (err) {
+      console.error("Error updating status:", err);
+    }
+  };
+
+  const handleDeleteTask = async (taskId) => {
+    if (confirm('Delete this task?')) {
+      try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'tasks', taskId));
+      } catch (err) {
+        console.error("Error deleting task:", err);
+      }
+    }
+  };
+
+  const todoTasks = tasks.filter(t => t.status === 'todo');
+  const progressTasks = tasks.filter(t => t.status === 'in-progress');
+  const doneTasks = tasks.filter(t => t.status === 'done');
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Project Header */}
+      <div className="bg-white border-b border-gray-200 p-6">
+        <button 
+          onClick={onBack}
+          className="text-gray-500 hover:text-gray-800 mb-4 flex items-center gap-1 font-medium text-sm transition-colors"
+        >
+          <ArrowLeft size={16} /> Back to Projects
+        </button>
+        <div className="flex justify-between items-start">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">{project.title}</h1>
+            <p className="text-gray-500 max-w-2xl">{project.description}</p>
+          </div>
+          <button 
+            onClick={() => setShowNewTask(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm transition-all"
+          >
+            <Plus size={18} /> Add Task
+          </button>
+        </div>
+        
+        <div className="mt-6 max-w-md">
+          <ProgressBar total={tasks.length} completed={doneTasks.length} />
+        </div>
+      </div>
+
+      {/* Kanban Board */}
+      <div className="flex-1 overflow-x-auto bg-gray-50 p-6">
+        <div className="flex gap-6 min-w-[1000px] h-full">
+          {/* Column: To Do */}
+          <div className="flex-1 flex flex-col min-w-[300px]">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-gray-700 flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-gray-400" />
+                To Do
+                <span className="bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full text-xs">{todoTasks.length}</span>
+              </h3>
+            </div>
+            <div className="bg-gray-100/50 rounded-xl p-2 flex-1 border border-dashed border-gray-200">
+              {todoTasks.map(task => (
+                <TaskCard key={task.id} task={task} onStatusChange={handleStatusChange} onDelete={handleDeleteTask} />
+              ))}
+              {todoTasks.length === 0 && (
+                <div className="text-center py-10 text-gray-400 text-sm">No tasks pending</div>
+              )}
+            </div>
+          </div>
+
+          {/* Column: In Progress */}
+          <div className="flex-1 flex flex-col min-w-[300px]">
+             <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-gray-700 flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-blue-500" />
+                In Progress
+                <span className="bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full text-xs">{progressTasks.length}</span>
+              </h3>
+            </div>
+            <div className="bg-blue-50/50 rounded-xl p-2 flex-1 border border-dashed border-blue-100">
+              {progressTasks.map(task => (
+                <TaskCard key={task.id} task={task} onStatusChange={handleStatusChange} onDelete={handleDeleteTask} />
+              ))}
+               {progressTasks.length === 0 && (
+                <div className="text-center py-10 text-gray-400 text-sm">No tasks in progress</div>
+              )}
+            </div>
+          </div>
+
+          {/* Column: Done */}
+          <div className="flex-1 flex flex-col min-w-[300px]">
+             <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-gray-700 flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-green-500" />
+                Done
+                <span className="bg-green-100 text-green-600 px-2 py-0.5 rounded-full text-xs">{doneTasks.length}</span>
+              </h3>
+            </div>
+            <div className="bg-green-50/50 rounded-xl p-2 flex-1 border border-dashed border-green-100">
+              {doneTasks.map(task => (
+                <TaskCard key={task.id} task={task} onStatusChange={handleStatusChange} onDelete={handleDeleteTask} />
+              ))}
+               {doneTasks.length === 0 && (
+                <div className="text-center py-10 text-gray-400 text-sm">No completed tasks</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* New Task Modal */}
+      {showNewTask && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4">Add New Task</h2>
+            <form onSubmit={handleAddTask} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Task Title</label>
+                <input
+                  autoFocus
+                  required
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="e.g. Design Homepage Wireframe"
+                  value={newTaskTitle}
+                  onChange={(e) => setNewTaskTitle(e.target.value)}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Due Date</label>
+                  <input
+                    type="date"
+                    required
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                    value={newTaskDeadline}
+                    onChange={(e) => setNewTaskDeadline(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Assignee</label>
+                  <select
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                    value={newTaskAssignee}
+                    onChange={(e) => setNewTaskAssignee(e.target.value)}
+                  >
+                    {TEAM_MEMBERS.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="flex gap-3 mt-6 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowNewTask(false)}
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 font-medium hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
+                >
+                  Create Task
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const Dashboard = ({ projects, onSelectProject, onCreateProject }) => {
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!newTitle.trim()) return;
+    await onCreateProject({ title: newTitle, description: newDesc });
+    setNewTitle('');
+    setNewDesc('');
+    setShowNewProject(false);
+  };
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto">
+      <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Projects</h1>
+          <p className="text-gray-500 mt-1">Manage your team's work and track progress.</p>
+        </div>
+        <button 
+          onClick={() => setShowNewProject(true)}
+          className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl font-medium flex items-center gap-2 shadow-lg shadow-blue-200 transition-all"
+        >
+          <Plus size={20} /> New Project
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {projects.map((project) => (
+          <div 
+            key={project.id}
+            onClick={() => onSelectProject(project)}
+            className="group bg-white rounded-2xl p-6 border border-gray-200 hover:border-blue-400 hover:shadow-lg transition-all cursor-pointer relative overflow-hidden"
+          >
+            <div className="absolute top-0 right-0 p-6 opacity-0 group-hover:opacity-100 transition-opacity">
+              <ChevronRight className="text-blue-500" />
+            </div>
+            
+            <div className="mb-4">
+              <span className="bg-blue-50 text-blue-600 text-xs font-bold px-2 py-1 rounded uppercase tracking-wider">Active</span>
+            </div>
+            
+            <h3 className="text-xl font-bold text-gray-900 mb-2 group-hover:text-blue-600 transition-colors">{project.title}</h3>
+            <p className="text-gray-500 text-sm line-clamp-2 mb-6 h-10">{project.description}</p>
+            
+            <div className="flex items-center justify-between border-t border-gray-50 pt-4">
+              <div className="flex -space-x-2">
+                {TEAM_MEMBERS.slice(0, 3).map((m, i) => (
+                  <div key={i} className={`w-8 h-8 rounded-full border-2 border-white ${m.color} text-white flex items-center justify-center text-xs font-bold`}>
+                    {m.avatar}
+                  </div>
+                ))}
+                <div className="w-8 h-8 rounded-full border-2 border-white bg-gray-100 text-gray-500 flex items-center justify-center text-xs font-bold">
+                  +1
+                </div>
+              </div>
+              <div className="text-xs text-gray-400 font-medium flex items-center gap-1">
+                <Clock size={14} /> {formatDate(project.createdAt?.toDate ? project.createdAt.toDate() : new Date())}
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {projects.length === 0 && (
+          <div className="col-span-full py-20 text-center bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+            <Layout className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+            <h3 className="text-lg font-bold text-gray-900 mb-2">No projects yet</h3>
+            <p className="text-gray-500 mb-6">Create your first project to get started.</p>
+            <button 
+              onClick={() => setShowNewProject(true)}
+              className="text-blue-600 font-semibold hover:underline"
+            >
+              Create Project
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* New Project Modal */}
+      {showNewProject && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-6">Create New Project</h2>
+            <form onSubmit={handleCreate} className="space-y-5">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Project Name</label>
+                <input
+                  autoFocus
+                  required
+                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-lg"
+                  placeholder="e.g. Q4 Marketing Campaign"
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Description</label>
+                <textarea
+                  required
+                  rows="3"
+                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                  placeholder="What is this project about?"
+                  value={newDesc}
+                  onChange={(e) => setNewDesc(e.target.value)}
+                />
+              </div>
+              <div className="flex gap-4 mt-8 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowNewProject(false)}
+                  className="flex-1 px-6 py-3 border border-gray-300 rounded-xl text-gray-700 font-bold hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-blue-200 transition-colors"
+                >
+                  Create Project
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [projects, setProjects] = useState([]);
+  const [selectedProject, setSelectedProject] = useState(null);
+
+  // Auth
+  useEffect(() => {
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                  await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  // Fetch Projects
+  useEffect(() => {
+    if (!user) return;
+    const q = query(
+      collection(db, 'artifacts', appId, 'public', 'data', 'projects'),
+      orderBy('createdAt', 'desc')
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  const handleCreateProject = async (projectData) => {
+    if (!user) return;
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'projects'), {
+        ...projectData,
+        creatorId: user.uid,
+        createdAt: serverTimestamp(),
+        status: 'active'
+      });
+    } catch (e) {
+      console.error("Error creating project", e);
+    }
+  };
+
+  if (!user) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-50">
+        <div className="animate-pulse flex flex-col items-center">
+          <div className="w-12 h-12 bg-blue-200 rounded-full mb-4"></div>
+          <div className="h-4 w-32 bg-gray-200 rounded"></div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-screen bg-gray-50 font-sans text-gray-900">
+      {/* Sidebar */}
+      <aside className="w-64 bg-white border-r border-gray-200 hidden md:flex flex-col">
+        <div className="p-6 flex items-center gap-3 border-b border-gray-100">
+          <div className="bg-blue-600 p-2 rounded-lg text-white">
+            <Layout size={20} />
+          </div>
+          <span className="font-bold text-xl tracking-tight">ProManager</span>
+        </div>
+        
+        <nav className="flex-1 p-4 space-y-1">
+          <button 
+            onClick={() => setSelectedProject(null)}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${!selectedProject ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-gray-600 hover:bg-gray-50'}`}
+          >
+            <Layout size={18} /> Dashboard
+          </button>
+          <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 hover:bg-gray-50 transition-all">
+            <CheckSquare size={18} /> My Tasks
+          </button>
+          <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 hover:bg-gray-50 transition-all">
+            <Users size={18} /> Team
+          </button>
+          <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 hover:bg-gray-50 transition-all">
+            <Settings size={18} /> Settings
+          </button>
+        </nav>
+
+        <div className="p-4 border-t border-gray-100">
+          <div className="bg-gray-50 rounded-xl p-4 flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-tr from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-md">
+              me
+            </div>
+            <div>
+              <p className="text-sm font-bold text-gray-900">Current User</p>
+              <p className="text-xs text-gray-500">Pro Plan</p>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 overflow-auto">
+        {selectedProject ? (
+          <ProjectView 
+            project={selectedProject} 
+            onBack={() => setSelectedProject(null)} 
+            user={user}
+          />
+        ) : (
+          <Dashboard 
+            projects={projects} 
+            onSelectProject={setSelectedProject}
+            onCreateProject={handleCreateProject}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
